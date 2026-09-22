@@ -32,6 +32,9 @@ pub struct LBFBuilder {
     pub prob: SPProblem,
     pub rng: Xoshiro256PlusPlus,
     pub sample_config: SampleConfig,
+    /// How far along the strip the fixed obstacles reach (0 without any).
+    /// The strip has to hold them as well as the items.
+    pub obstacle_reach: f32,
 }
 
 impl LBFBuilder {
@@ -48,12 +51,25 @@ impl LBFBuilder {
         for h in extra_hazards {
             prob.layout.register_hazard(h.clone());
         }
+        // The initial strip is sized for the items alone; with obstacles in
+        // the way the items need that much room *beyond* the obstacles, so
+        // start the strip that much wider instead of growing into it 20% at
+        // a time (every failed growth step is a full placement search).
+        let obstacle_reach = extra_hazards
+            .iter()
+            .map(|h| h.shape.bbox.x_max)
+            .fold(0.0_f32, f32::max);
+        if obstacle_reach > 0.0 {
+            let width = prob.strip_width() + obstacle_reach;
+            prob.change_strip_width(width);
+        }
 
         Self {
             instance,
             prob,
             rng,
             sample_config,
+            obstacle_reach,
         }
     }
 
@@ -97,7 +113,7 @@ impl LBFBuilder {
 
             let next_width = self.prob.strip_width() * 1.2;
             // Retain the existing heuristic ceiling, without treating it as infeasibility.
-            let width_limit = 2.0 * self.instance.items.iter()
+            let width_limit = self.obstacle_reach + 2.0 * self.instance.items.iter()
                 .map(|(item, qty)| item.shape_cd.diameter * *qty as f32)
                 .sum::<f32>();
             if next_width >= width_limit {
