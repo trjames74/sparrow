@@ -2,6 +2,7 @@ use crate::eval::lbf_evaluator::LBFEvaluator;
 use crate::eval::sample_eval::SampleEval;
 use crate::sample::search::{search_placement, SampleConfig};
 use itertools::Itertools;
+use jagua_rs::collision_detection::hazards::Hazard;
 use jagua_rs::entities::Instance;
 use jagua_rs::probs::spp::entities::{SPInstance, SPPlacement, SPProblem};
 use jagua_rs::Instant;
@@ -34,12 +35,19 @@ pub struct LBFBuilder {
 }
 
 impl LBFBuilder {
+    /// `extra_hazards` are fixed obstacles — holes the items must keep out of.
+    /// They go on the layout before any item is placed, so the construction
+    /// heuristic packs around them from the start.
     pub fn new(
         instance: SPInstance,
         rng: Xoshiro256PlusPlus,
         sample_config: SampleConfig,
+        extra_hazards: &[Hazard],
     ) -> Self {
-        let prob = SPProblem::new(instance.clone());
+        let mut prob = SPProblem::new(instance.clone());
+        for h in extra_hazards {
+            prob.layout.register_hazard(h.clone());
+        }
 
         Self {
             instance,

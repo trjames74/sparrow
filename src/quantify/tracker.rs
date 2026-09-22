@@ -8,14 +8,21 @@ use jagua_rs::entities::{Layout, PItemKey};
 use ordered_float::Float;
 use slotmap::SecondaryMap;
 
-/// Tracker of both collisions between pair of items and collisions with the container.
+/// Tracker of collisions between pairs of items, with the container, and with holes.
 /// It also stores the weights for every pair of hazards and is used as a cache for collisions.
+///
+/// A hole is a `HazardEntity::Hole` registered on the layout — a fixed obstacle
+/// items must keep out of. Like the container it gets one entry per item: the
+/// summed loss against every hole, and one weight, so the guided-local-search
+/// weighting learns to push an item out of holes exactly as it does off the
+/// strip edge.
 #[derive(Debug, Clone)]
 pub struct CollisionTracker {
     pub size: usize,
     pub pk_idx_map: SecondaryMap<PItemKey, usize>,
     pub pair_collisions: PairMatrix,
     pub container_collisions: Vec<CTEntry>,
+    pub hole_collisions: Vec<CTEntry>,
 }
 
 pub type CTSnapshot = CollisionTracker;
@@ -32,6 +39,7 @@ impl CollisionTracker {
                 .collect(),
             pair_collisions: PairMatrix::new(size),
             container_collisions: vec![CTEntry { weight: 1.0, loss: 0.0 }; size],
+            hole_collisions: vec![CTEntry { weight: 1.0, loss: 0.0 }; size],
         };
 
         // Recompute the loss for all items
@@ -54,6 +62,7 @@ impl CollisionTracker {
             self.pair_collisions[(idx, i)].loss = 0.0;
         }
         self.container_collisions[idx].loss = 0.0;
+        self.hole_collisions[idx].loss = 0.0;
 
         // Compute which hazards are currently colliding with the item
         let mut collector = BasicHazardCollector::with_capacity(l.placed_items.len() + 1);
@@ -62,7 +71,7 @@ impl CollisionTracker {
         collector.remove_by_entity(&HazardEntity::from((pk, pi)));
 
         // For each colliding hazard, quantify the collision and store it in the tracker
-        for (_, haz) in collector.iter() {
+        for (hkey, haz) in collector.iter() {
             match haz {
                 HazardEntity::PlacedItem { pk: other_pk, .. } => {
                     let shape_other = &l.placed_items[*other_pk].shape;
@@ -77,6 +86,13 @@ impl CollisionTracker {
                     assert!(loss > 0.0, "loss for a collision should be > 0.0");
                     self.container_collisions[idx].loss = loss;
                 }
+                HazardEntity::Hole { .. } => {
+                    // Several holes may touch one item: sum them into its one slot.
+                    let hole_shape = &l.cde().hazards_map[hkey].shape;
+                    let loss = quantify_collision_poly_poly(shape, hole_shape);
+                    assert!(loss > 0.0, "loss for a collision should be > 0.0");
+                    self.hole_collisions[idx].loss += loss;
+                }
                 _ => unimplemented!("unsupported hazard entity"),
             }
         }
@@ -90,6 +106,9 @@ impl CollisionTracker {
             .for_each(|(a, b)| a.loss = b.loss);
         self.container_collisions.iter_mut()
             .zip(cts.container_collisions.iter())
+            .for_each(|(a, b)| a.loss = b.loss);
+        self.hole_collisions.iter_mut()
+            .zip(cts.hole_collisions.iter())
             .for_each(|(a, b)| a.loss = b.loss);
         debug_assert!(tracker_matches_layout(self, layout));
     }
@@ -114,12 +133,14 @@ impl CollisionTracker {
         // Find the maximum loss across all entries
         let max_loss = self.pair_collisions.data.iter()
             .chain(self.container_collisions.iter())
+            .chain(self.hole_collisions.iter())
             .map(|e| e.loss)
             .fold(0.0, |a, b| a.max(b));
 
         // Go over all entries (pairs) and modify their weights.
         for e in self.pair_collisions.data.iter_mut()
-            .chain(self.container_collisions.iter_mut()) {
+            .chain(self.container_collisions.iter_mut())
+            .chain(self.hole_collisions.iter_mut()) {
             let multiplier = match e.loss == 0.0 {
                 true => {
                     // No collision at the moment, slowly decay the weight back to 1.0
@@ -144,6 +165,17 @@ impl CollisionTracker {
         self.container_collisions[idx].weight
     }
 
+    pub fn get_hole_weight(&self, pk: PItemKey) -> f32 {
+        let idx = self.pk_idx_map[pk];
+        self.hole_collisions[idx].weight
+    }
+
+    /// The item's summed loss against every hole it overlaps.
+    pub fn get_hole_loss(&self, pk: PItemKey) -> f32 {
+        let idx = self.pk_idx_map[pk];
+        self.hole_collisions[idx].loss
+    }
+
     /// Algorithm 1 from https://doi.org/10.48550/arXiv.2509.13329
     /// Evaluations between item pairs are stored in this data-structure for quick and easy retrieval.
     pub fn get_pair_loss(&self, pk1: PItemKey, pk2: PItemKey) -> f32 {
@@ -163,7 +195,7 @@ impl CollisionTracker {
             .map(|i| self.pair_collisions[(idx, i)].loss)
             .sum::<f32>();
 
-        self.container_collisions[idx].loss + pair_loss
+        self.container_collisions[idx].loss + self.hole_collisions[idx].loss + pair_loss
     }
 
     pub fn get_weighted_loss(&self, pk: PItemKey) -> f32 {
@@ -173,21 +205,25 @@ impl CollisionTracker {
             .map(|i| self.pair_collisions[(idx, i)].weighted_loss())
             .sum::<f32>();
 
-        self.container_collisions[idx].weighted_loss() + w_pair_loss
+        self.container_collisions[idx].weighted_loss() + self.hole_collisions[idx].weighted_loss() + w_pair_loss
     }
 
     pub fn get_total_loss(&self) -> f32 {
         let cont_o = self.container_collisions.iter().map(|e| e.loss).sum::<f32>();
+        let hole_o = self.hole_collisions.iter().map(|e| e.loss).sum::<f32>();
 
         let pair_o = self.pair_collisions.data.iter()
             .map(|e| e.loss)
             .sum::<f32>();
 
-        cont_o + pair_o
+        cont_o + hole_o + pair_o
     }
 
     pub fn get_total_weighted_loss(&self) -> f32 {
         let cont_w_o = self.container_collisions.iter()
+            .map(|e| e.weighted_loss())
+            .sum::<f32>();
+        let hole_w_o = self.hole_collisions.iter()
             .map(|e| e.weighted_loss())
             .sum::<f32>();
 
@@ -195,7 +231,7 @@ impl CollisionTracker {
             .map(|e| e.weighted_loss())
             .sum::<f32>();
 
-        cont_w_o + pair_w_o
+        cont_w_o + hole_w_o + pair_w_o
     }
 }
 

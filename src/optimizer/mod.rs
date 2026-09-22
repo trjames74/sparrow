@@ -32,20 +32,30 @@ pub fn optimize(
     terminator: &mut impl Terminator,
     expl_config: &ExplorationConfig,
     cmpr_config: &CompressionConfig,
-    initial_solution: Option<&SPSolution>
+    initial_solution: Option<&SPSolution>,
+    extra_hazards: &[jagua_rs::collision_detection::hazards::Hazard],
 ) -> Result<SPSolution, ConstructionError> {
     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
     
     // First build an initial solution if none is provided
     let start_prob = match initial_solution {
         None => {
-            let builder = LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG).construct()?;
+            let builder = LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG, extra_hazards).construct()?;
             builder.prob
         }
         Some(init_sol) => {
             info!("[OPT] warm starting from provided initial solution");
             let mut prob = jagua_rs::probs::spp::entities::SPProblem::new(instance.clone());
             prob.restore(init_sol);
+            // A warm start made without the hazards still gets them; one made
+            // with them already carries them in its snapshot (restore diffs
+            // dynamic hazards by entity, so nothing is registered twice).
+            for h in extra_hazards {
+                let present = prob.layout.cde().hazards_map.values().any(|x| x.entity == h.entity);
+                if !present {
+                    prob.layout.register_hazard(h.clone());
+                }
+            }
             prob
         }
     };

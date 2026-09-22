@@ -85,7 +85,7 @@ fn main() -> Result<()> {
 
                 s.spawn(move |_| {
                     let mut next_rng = || Xoshiro256PlusPlus::seed_from_u64(rng.next_u64());
-                    let builder = match LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG).construct() {
+                    let builder = match LBFBuilder::new(instance.clone(), next_rng(), LBF_SAMPLE_CONFIG, &[]).construct() {
                         Ok(builder) => builder,
                         Err(error) => {
                             *sol_slice = Some(Err(error));

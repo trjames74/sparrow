@@ -84,7 +84,7 @@ fn start_optimizer(
                 &config.expl_cfg,
                 &config.cmpr_cfg,
                 initial_solution.as_ref(),
-            )
+        &[])
         })
         .expect("failed to start optimizer")
 }

@@ -126,6 +126,22 @@ pub fn tracker_matches_layout(ct: &CollisionTracker, l: &Layout) -> bool {
         } else {
             assert_eq!(ct.get_container_loss(pk1), 0.0);
         }
+        // Holes: the tracker holds one summed loss per item against every hole.
+        let calc_hole_loss: f32 = collector
+            .iter()
+            .filter(|(_, he)| matches!(he, HazardEntity::Hole { .. }))
+            .map(|(hk, _)| quantify_collision_poly_poly(&pi1.shape, &l.cde().hazards_map[hk].shape))
+            .sum();
+        let stored_hole_loss = ct.get_hole_loss(pk1);
+        if calc_hole_loss > 0.0 {
+            assert!(
+                approx_eq!(f32, stored_hole_loss, calc_hole_loss, epsilon = 0.10 * calc_hole_loss),
+                "hole loss for {:?}: stored {stored_hole_loss} vs calculated {calc_hole_loss}",
+                HazardEntity::from((pk1, pi1))
+            );
+        } else {
+            assert_eq!(stored_hole_loss, 0.0);
+        }
     }
 
     true

@@ -9,6 +9,7 @@ use crate::quantify::tracker::CollisionTracker;
 use jagua_rs::collision_detection::hazards::HazardEntity;
 use jagua_rs::entities::{Layout, PItemKey};
 use jagua_rs::geometry::primitives::SPolygon;
+use std::sync::Arc;
 
 /// Computes Sparrow's collision loss as `jagua-rs` discovers hazards.
 pub(super) struct CollisionLossEvaluator<'a> {
@@ -17,18 +18,30 @@ pub(super) struct CollisionLossEvaluator<'a> {
     current_pk: PItemKey,
     loss: f32,
     loss_bound: f32,
+    /// The holes registered on the layout, by entity. The CDE only hands the
+    /// evaluator a `HazardEntity`, and holes never move, so they are looked up
+    /// once here rather than scanned for on every collision.
+    hole_shapes: Vec<(HazardEntity, Arc<SPolygon>)>,
     #[cfg(feature = "simd")]
     poles_soa: CirclesSoA,
 }
 
 impl<'a> CollisionLossEvaluator<'a> {
     pub(super) fn new(layout: &'a Layout, ct: &'a CollisionTracker, current_pk: PItemKey) -> Self {
+        let hole_shapes = layout
+            .cde()
+            .hazards_map
+            .values()
+            .filter(|h| matches!(h.entity, HazardEntity::Hole { .. }))
+            .map(|h| (h.entity, h.shape.clone()))
+            .collect();
         Self {
             layout,
             ct,
             current_pk,
             loss: 0.0,
             loss_bound: f32::INFINITY,
+            hole_shapes,
             #[cfg(feature = "simd")]
             poles_soa: CirclesSoA::new(),
         }
@@ -91,6 +104,32 @@ impl<'a> CollisionLossEvaluator<'a> {
                 quantify_collision_poly_container(shape, self.layout.container.outer_cd.bbox)
                     * self.ct.get_container_weight(self.current_pk),
             ),
+            HazardEntity::Hole { .. } => {
+                let hole_shape = self
+                    .hole_shapes
+                    .iter()
+                    .find(|(e, _)| *e == hazard)
+                    .map(|(_, s)| s.as_ref())
+                    .expect("hole hazard reported by the CDE but not registered on the layout");
+                let weight = self.ct.get_hole_weight(self.current_pk);
+
+                #[cfg(feature = "simd")]
+                {
+                    quantify_collision_poly_poly_simd_bounded(
+                        hole_shape,
+                        shape,
+                        &self.poles_soa,
+                        max_loss / weight,
+                    )
+                    .map(|loss| loss * weight)
+                }
+
+                #[cfg(not(feature = "simd"))]
+                {
+                    let loss = quantify_collision_poly_poly(hole_shape, shape) * weight;
+                    (loss <= max_loss).then_some(loss)
+                }
+            }
             _ => unimplemented!("unsupported hazard entity"),
         }
     }
